@@ -3,7 +3,7 @@
   "routes": [
     {
       "src": "/api/formulario",
-      "dest": "/api/formulario.py"
+      "dest": "/api/formulario.js"
     }
   ]
 }
