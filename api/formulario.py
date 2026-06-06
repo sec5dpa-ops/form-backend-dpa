@@ -1,17 +1,12 @@
 from http.server import BaseHTTPRequestHandler
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email.utils import formatdate
-from email import encoders
 import json
 import base64
 import os
+import urllib.request
+import urllib.error
 from datetime import datetime
 
-GMAIL_EMAIL = os.getenv('GMAIL_EMAIL', 'sec5dpa@gmail.com')
-GMAIL_PASSWORD = os.getenv('GMAIL_PASSWORD')
+RESEND_API_KEY = os.getenv('RESEND_API_KEY')
 
 class handler(BaseHTTPRequestHandler):
 
@@ -20,21 +15,12 @@ class handler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', '*')
         self.send_header('Access-Control-Allow-Headers', '*')
-        self.send_header('Access-Control-Max-Age', '86400')
         self.end_headers()
-
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Content-Type', 'application/json')
-        self.end_headers()
-        self.wfile.write(json.dumps({'status': 'ok'}).encode())
 
     def do_POST(self):
         try:
             length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(length)
-            datos = json.loads(body.decode('utf-8'))
+            datos = json.loads(self.rfile.read(length).decode('utf-8'))
             enviar_email(datos)
             self.send_response(200)
             self.send_header('Access-Control-Allow-Origin', '*')
@@ -52,37 +38,56 @@ class handler(BaseHTTPRequestHandler):
         pass
 
 def enviar_email(datos):
-    server = smtplib.SMTP('smtp.gmail.com', 587)
-    server.starttls()
-    server.login(GMAIL_EMAIL, GMAIL_PASSWORD)
-    msg = MIMEMultipart()
-    msg['From'] = GMAIL_EMAIL
-    msg['To'] = 'sec5dpa@gmail.com'
-    msg['Date'] = formatdate(localtime=True)
-    msg['Subject'] = f"[ADMISION] {datos.get('nombre')} - {datos.get('tramite')}"
+    pdf_b64 = datos.get('pdfBase64', '')
+    nombre = datos.get('nombre', 'formulario').replace(' ', '_')
+    
     cuerpo = f"""FORMULARIO DE ADMISION - DEFENSORIA DPA N1
+
 Nombre: {datos.get('nombre')}
 DNI: {datos.get('dni')} | CUIL: {datos.get('cuil')}
 Tel: {datos.get('tel')} | Email: {datos.get('email','---')}
 Localidad: {datos.get('localidad')} - {datos.get('barrio')}
 Domicilio: {datos.get('domicilio')}
+
 Ocupacion: {datos.get('ocupacion')}
 Ingresos: ${datos.get('monto')} {datos.get('freq')}
+Recibo: {datos.get('recibo')} | Planes: {datos.get('planes')}
 Grupo: {datos.get('grupo')} personas | Total: ${datos.get('total_ing')}
 Vivienda: {datos.get('vivienda')} ({datos.get('anios_vivienda')} anios)
+
 Contrario: {datos.get('cont_nombre')} | DNI: {datos.get('cont_dni','---')}
+Localidad: {datos.get('cont_localidad')} - {datos.get('cont_barrio')}
+Domicilio: {datos.get('cont_domicilio')}
+Tel: {datos.get('cont_tel','---')} | Trabajo: {datos.get('cont_trabajo','---')}
+
 Tramite: {datos.get('tramite')}
-Fecha: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
-"""
-    msg.attach(MIMEText(cuerpo, 'plain', 'utf-8'))
-    pdf_b64 = datos.get('pdfBase64', '')
+Hijos: {datos.get('datos_hijos','---')}
+Expediente: {datos.get('nro_exp','---')}
+Observaciones: {datos.get('observaciones','---')}
+
+Fecha: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"""
+
+    payload = {
+        "from": "DPA Formulario <onboarding@resend.dev>",
+        "to": ["sec5dpa@gmail.com"],
+        "subject": f"[ADMISION] {datos.get('nombre')} - {datos.get('tramite')}",
+        "text": cuerpo
+    }
+
     if pdf_b64:
-        att = MIMEBase('application', 'octet-stream')
-        att.set_payload(base64.b64decode(pdf_b64))
-        encoders.encode_base64(att)
-        nombre = datos.get('nombre', 'formulario').replace(' ', '_')
-        att.add_header('Content-Disposition', 'attachment',
-                       filename=f"FDJ_{nombre}_{datetime.now().strftime('%Y%m%d')}.pdf")
-        msg.attach(att)
-    server.send_message(msg)
-    server.quit()
+        payload["attachments"] = [{
+            "filename": f"FDJ_{nombre}_{datetime.now().strftime('%Y%m%d')}.pdf",
+            "content": pdf_b64
+        }]
+
+    data = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(
+        'https://api.resend.com/emails',
+        data=data,
+        headers={
+            'Authorization': f'Bearer {RESEND_API_KEY}',
+            'Content-Type': 'application/json'
+        }
+    )
+    with urllib.request.urlopen(req) as response:
+        return json.loads(response.read().decode())
