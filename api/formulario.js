@@ -1,125 +1,274 @@
 // api/formulario.js — Backend DPA N°1
-// Recibe el formulario desde el HTML, envía email con PDF adjunto via Resend
+// Recibe el formulario, genera la demanda en Word y envía todo por email via Resend
+
+const fs = require('fs');
+const path = require('path');
+const PizZip = require('pizzip');
+const Docxtemplater = require('docxtemplater');
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+// Convierte número a texto para porcentajes (20 → "VEINTE POR CIENTO (20%)")
+function porcentajeTexto(n) {
+  const palabras = {
+    20: 'VEINTE POR CIENTO (20%)',
+    25: 'VEINTICINCO POR CIENTO (25%)',
+    30: 'TREINTA POR CIENTO (30%)',
+    35: 'TREINTA Y CINCO POR CIENTO (35%)',
+    40: 'CUARENTA POR CIENTO (40%)',
+  };
+  return palabras[parseInt(n)] || `${n} POR CIENTO (${n}%)`;
+}
+
+function porcentajeTextoSimple(n) {
+  const palabras = {
+    20: 'veinte por ciento',
+    25: 'veinticinco por ciento',
+    30: 'treinta por ciento',
+    35: 'treinta y cinco por ciento',
+    40: 'cuarenta por ciento',
+  };
+  return palabras[parseInt(n)] || `${n} por ciento`;
+}
+
+// Formatea una fecha ISO (YYYY-MM-DD) a texto legible
+function fechaTexto(iso) {
+  if (!iso) return '';
+  const meses = ['enero','febrero','marzo','abril','mayo','junio',
+                 'julio','agosto','septiembre','octubre','noviembre','diciembre'];
+  const [y, m, d] = iso.split('-');
+  return `${parseInt(d)} de ${meses[parseInt(m)-1]} de ${y}`;
+}
+
+// Calcula años entre dos fechas
+function aniosEntre(fechaIso1, fechaIso2) {
+  if (!fechaIso1 || !fechaIso2) return '';
+  const d1 = new Date(fechaIso1);
+  const d2 = new Date(fechaIso2);
+  const años = Math.abs(Math.round((d2 - d1) / (1000 * 60 * 60 * 24 * 365)));
+  return años.toString();
+}
+
+// Formatea DNI con puntos (31655988 → 31.655.988)
+function formatDNI(dni) {
+  if (!dni) return '';
+  const n = dni.replace(/\D/g, '');
+  return n.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+}
+
+// Elige qué template usar según los datos del formulario
+function elegirTemplate(datos) {
+  const tramite = (datos.tramite || '').toUpperCase();
+  if (tramite === 'ALIMENTOS') {
+    if (datos.dem_trabajo_reg === 'SI') return 'tpl_alimentos_registrado.docx';
+    return 'tpl_alimentos_informal.docx';
+  }
+  if (tramite === 'DIVORCIO') {
+    if (datos.tiene_bienes === 'SI' || datos.hijos_menores === 'SI') {
+      return 'tpl_divorcio_con_propuesta.docx';
+    }
+    return 'tpl_divorcio_sin_propuesta.docx';
+  }
+  return null; // Otros trámites: sin demanda automática por ahora
+}
+
+// Construye el objeto de datos para llenar el template
+function construirContexto(d) {
+  // Nombre corto del hijo (iniciales) para el template de alimentos informal
+  const hijoNombreCorto = d.hijo_nombre
+    ? d.hijo_nombre.split(' ').map(p => p[0]).join('.') + '.'
+    : '';
+
+  return {
+    // Solicitante
+    solicitante_nombre:    (d.nombre || '').toUpperCase(),
+    solicitante_dni:       formatDNI(d.dni),
+    solicitante_cuil:      d.cuil || '',
+    solicitante_domicilio: d.domicilio ? `${d.domicilio}, ${d.localidad}` : d.localidad || '',
+    solicitante_tel:       d.tel || '',
+    solicitante_email:     d.email || '',
+
+    // Hijo/a
+    hijo_nombre:           (d.hijo_nombre || '').toUpperCase(),
+    hijo_nombre_corto:     hijoNombreCorto.toUpperCase(),
+    hijo_dni:              formatDNI(d.hijo_dni),
+    hijo_cuil:             d.hijo_cuil || '',
+    hijo_fecha_nac:        fechaTexto(d.hijo_fnac),
+
+    // Demandado/a (contraparte)
+    demandado_nombre:      (d.cont_nombre || '').toUpperCase(),
+    demandado_dni:         formatDNI(d.cont_dni),
+    demandado_cuil:        d.cont_cuil || '',
+    demandado_domicilio:   d.cont_domicilio ? `${d.cont_domicilio}, ${d.cont_localidad || ''}` : d.cont_localidad || '',
+    demandado_tel:         d.cont_tel || '',
+    demandado_trabajo_tipo: d.dem_trabajo_tipo || 'trabajador/a informal',
+
+    // Empresa (alimentos registrado)
+    empresa_nombre:        (d.empresa_nombre || '').toUpperCase(),
+    empresa_cuil:          d.empresa_cuil || '',
+    empresa_domicilio:     d.empresa_domicilio || '',
+    empresa_ciudad:        d.empresa_ciudad ? `la Ciudad de ${d.empresa_ciudad}` : 'su ciudad',
+
+    // Porcentajes alimentos
+    porcentaje_prov_texto: porcentajeTexto(d.porcentaje_prov || 20),
+    porcentaje_def:        d.porcentaje_def || '30',
+    porcentaje_def_texto:  porcentajeTextoSimple(d.porcentaje_def || 30),
+
+    // Abuelos (vía subsidiaria)
+    abuelo_nombre:         (d.abuelo_nombre || '').toUpperCase(),
+    abuelo_dni:            formatDNI(d.abuelo_dni),
+    abuelo_domicilio:      d.abuelo_domicilio || '',
+    abuelo_trabajo:        d.abuelo_trabajo || 'trabajador informal',
+    abuelo_tel:            d.abuelo_tel || '',
+    abuela_nombre:         (d.abuela_nombre || '').toUpperCase(),
+    abuela_dni:            formatDNI(d.abuela_dni),
+    abuela_domicilio:      d.abuela_domicilio || '',
+    abuela_trabajo:        d.abuela_trabajo || '',
+    abuela_tel:            d.abuela_tel || '',
+
+    // Divorcio - cónyuge
+    conyuge_nombre:        (d.cont_nombre || '').toUpperCase(),
+    conyuge_dni:           formatDNI(d.cont_dni),
+    conyuge_cuil:          d.cont_cuil || '',
+    conyuge_domicilio:     d.cont_domicilio ? `${d.cont_domicilio}, ${d.cont_localidad || ''}` : d.cont_localidad || '',
+    conyuge_tel:           d.cont_tel || '',
+
+    // Divorcio - matrimonio
+    fecha_matrimonio_texto: fechaTexto(d.fecha_matrimonio),
+    mat_acta_nro:          d.mat_acta_nro || '____',
+    mat_tomo:              d.mat_tomo || '____',
+    mat_folio:             d.mat_folio || '____',
+    mat_anio:              d.mat_anio || '____',
+    mat_ciudad:            d.mat_ciudad || 'Corrientes',
+    fecha_separacion_texto: fechaTexto(d.fecha_separacion),
+    anios_separacion:      aniosEntre(d.fecha_separacion, new Date().toISOString().split('T')[0]),
+
+    // Divorcio - hijos y bienes
+    hijos_nombres:         d.datos_hijos_div || '',
+    desc_bienes:           d.desc_bienes || '',
+  };
+}
+
+// Genera el .docx relleno y devuelve un Buffer
+function generarDocx(templatePath, contexto) {
+  const content = fs.readFileSync(templatePath, 'binary');
+  const zip = new PizZip(content);
+  const doc = new Docxtemplater(zip, {
+    paragraphLoop: true,
+    linebreaks: true,
+    delimiters: { start: '{', end: '}' },
+  });
+  doc.render(contexto);
+  return doc.getZip().generate({ type: 'nodebuffer', compression: 'DEFLATE' });
+}
+
+// ── Handler principal ────────────────────────────────────────────────────────
 
 module.exports = async function handler(req, res) {
-  // CORS — permite cualquier origen (necesario para llamadas desde Netlify)
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  // Preflight OPTIONS
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-
-  // Solo acepta POST
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
     const datos = req.body;
-
     if (!datos || !datos.nombre) {
-      return res.status(400).json({ error: 'Datos del formulario incompletos' });
+      return res.status(400).json({ error: 'Datos incompletos' });
     }
 
-    const nombre = (datos.nombre || 'solicitante').replace(/\s+/g, '_');
-    const tramite = datos.tramite || 'SIN_TRAMITE';
+    const nombre    = datos.nombre.replace(/\s+/g, '_');
+    const tramite   = datos.tramite || 'ADMISION';
+    const contexto  = construirContexto(datos);
+    const adjuntos  = [];
 
-    // Cuerpo del email con todos los datos del formulario
-    const cuerpoEmail = `
-FORMULARIO DE ADMISIÓN — DEFENSORÍA DE POBRES Y AUSENTES N°1
-=============================================================
-
-DATOS PERSONALES
-----------------
-Nombre y apellido : ${datos.nombre || ''}
-DNI               : ${datos.dni || ''}
-CUIL              : ${datos.cuil || ''}
-Fecha de nac.     : ${datos.fnac || ''}
-Teléfono          : ${datos.tel || ''}
-Email             : ${datos.email || ''}
-Localidad         : ${datos.localidad || ''}
-Barrio            : ${datos.barrio || ''}
-Domicilio         : ${datos.domicilio || ''}
-
-SITUACIÓN ECONÓMICA
--------------------
-Ocupación         : ${datos.ocupacion || ''}
-Ingresos          : $${datos.monto || ''} (${datos.freq || ''})
-Recibe recibo     : ${datos.recibo || ''}
-Recibe planes     : ${datos.planes || ''}
-Tipo de plan      : ${datos.tipo_plan || ''}
-Monto plan        : $${datos.monto_plan || ''}
-Grupo familiar    : ${datos.grupo || ''} personas
-Total ingresos    : $${datos.total_ing || ''}
-Vivienda          : ${datos.vivienda || ''}
-Años en vivienda  : ${datos.anios_vivienda || ''}
-
-CONTRAPARTE
------------
-Nombre            : ${datos.cont_nombre || ''}
-DNI               : ${datos.cont_dni || ''}
-Edad              : ${datos.cont_edad || ''}
-Localidad         : ${datos.cont_localidad || ''}
-Barrio            : ${datos.cont_barrio || ''}
-Domicilio         : ${datos.cont_domicilio || ''}
-Teléfono          : ${datos.cont_tel || ''}
-Trabajo           : ${datos.cont_trabajo || ''}
-Tiene ingresos    : ${datos.cont_ing || ''}
-
-TRÁMITE SOLICITADO
-------------------
-Trámite           : ${tramite}
-Cantidad de hijos : ${datos.cant_hijos || ''}
-Datos de hijos    : ${datos.datos_hijos || ''}
-Convivencia       : ${datos.se_fue === 'SI' ? 'No conviven' : 'Conviven'}
-Causa judicial    : ${datos.causa || ''}
-N° de expediente  : ${datos.nro_exp || ''}
-Observaciones     : ${datos.observaciones || ''}
-
-=============================================================
-Formulario recibido automáticamente desde el sistema de admisión digital.
-    `.trim();
-
-    // Armar adjuntos — el PDF viene en base64 desde el formulario
-    const attachments = [];
+    // 1. PDF de la Declaración Jurada (viene del formulario)
     if (datos.pdfBase64) {
-      attachments.push({
+      adjuntos.push({
         filename: `FDJ_${nombre}_${tramite}.pdf`,
-        content: datos.pdfBase64  // Resend acepta base64 directamente
+        content:  datos.pdfBase64,
       });
     }
 
-    // Llamada a la API de Resend
-    const response = await fetch('https://api.resend.com/emails', {
+    // 2. Demanda en Word (generada automáticamente)
+    const templateName = elegirTemplate(datos);
+    if (templateName) {
+      const templatePath = path.join(process.cwd(), 'templates', templateName);
+      if (fs.existsSync(templatePath)) {
+        const docxBuffer = generarDocx(templatePath, contexto);
+        adjuntos.push({
+          filename: `DEMANDA_${nombre}_${tramite}.docx`,
+          content:  docxBuffer.toString('base64'),
+        });
+      } else {
+        console.warn('Template no encontrado:', templatePath);
+      }
+    }
+
+    // 3. Cuerpo del email con todos los datos
+    const cuerpo = `
+FORMULARIO DE ADMISIÓN — DEFENSORÍA DE POBRES Y AUSENTES N°1
+=============================================================
+Trámite : ${tramite}
+Fecha   : ${new Date().toLocaleDateString('es-AR')}
+
+SOLICITANTE
+-----------
+Nombre   : ${datos.nombre}
+DNI      : ${datos.dni}
+CUIL     : ${datos.cuil}
+Tel      : ${datos.tel}
+Domicilio: ${datos.domicilio}, ${datos.localidad}
+
+CONTRAPARTE
+-----------
+Nombre   : ${datos.cont_nombre}
+DNI      : ${datos.cont_dni}
+Domicilio: ${datos.cont_domicilio}, ${datos.cont_localidad || ''}
+Tel      : ${datos.cont_tel || ''}
+
+${tramite === 'ALIMENTOS' ? `DATOS ALIMENTOS
+---------------
+Hijo/a   : ${datos.hijo_nombre} (DNI ${datos.hijo_dni})
+Trabajo dem.: ${datos.dem_trabajo_reg === 'SI' ? `Registrado — ${datos.empresa_nombre || ''}` : 'Informal'}
+Vía subsidiaria: ${datos.tiene_abuelos || 'No'}` : ''}
+
+${tramite === 'DIVORCIO' ? `DATOS DIVORCIO
+--------------
+Matrimonio : ${fechaTexto(datos.fecha_matrimonio)} en ${datos.mat_ciudad || 'Corrientes'}
+Separación : ${fechaTexto(datos.fecha_separacion)}
+Hijos menores: ${datos.hijos_menores || 'No'}
+Bienes       : ${datos.tiene_bienes || 'No'}` : ''}
+
+Observaciones: ${datos.observaciones || '—'}
+=============================================================
+    `.trim();
+
+    // 4. Enviar por Resend
+    const resp = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        from: 'DPA Formulario <onboarding@resend.dev>',
-        to: ['sec5dpa@gmail.com'],
-        subject: `[ADMISIÓN] ${datos.nombre} — ${tramite}`,
-        text: cuerpoEmail,
-        attachments: attachments
-      })
+        from:        'DPA Formulario <onboarding@resend.dev>',
+        to:          ['sec5dpa@gmail.com'],
+        subject:     `[ADMISIÓN] ${datos.nombre} — ${tramite}`,
+        text:        cuerpo,
+        attachments: adjuntos,
+      }),
     });
 
-    const result = await response.json();
-
-    if (!response.ok) {
-      console.error('Error Resend:', result);
-      throw new Error(result.message || JSON.stringify(result));
-    }
+    const result = await resp.json();
+    if (!resp.ok) throw new Error(result.message || JSON.stringify(result));
 
     console.log('Email enviado OK:', result.id);
     return res.status(200).json({ success: true, emailId: result.id });
 
   } catch (error) {
-    console.error('Error handler:', error.message);
+    console.error('Error:', error.message);
     return res.status(500).json({ success: false, error: error.message });
   }
 };
