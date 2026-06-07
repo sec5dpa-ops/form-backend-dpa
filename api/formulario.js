@@ -143,9 +143,22 @@ function construirContexto(d) {
     fecha_separacion_texto: fechaTexto(d.fecha_separacion),
     anios_separacion:      aniosEntre(d.fecha_separacion, new Date().toISOString().split('T')[0]),
 
+    // Apellido del demandado (para alimentos informal)
+    demandado_apellido:    d.cont_nombre ? d.cont_nombre.split(' ')[0] : '[REVISAR: apellido demandado]',
+
     // Divorcio - hijos y bienes
     hijos_nombres:         d.datos_hijos_div || '[REVISAR: consignar nombres, DNI y edades de los hijos]',
-    desc_bienes:           d.desc_bienes || 'REVISAR: describir bien',
+    desc_bienes:           d.desc_bienes || '[REVISAR: describir el bien]',
+
+    // Convenio regulador - cuidado personal (texto dinámico según si hay hijos menores)
+    convenio_cuidado_personal: (d.hijos_menores === 'SI' && d.datos_hijos_div)
+      ? `de nuestra unión han nacido hijos/as menores de edad: ${d.datos_hijos_div}. [REVISAR: acordar cuidado personal, régimen de comunicación y cuota alimentaria].`
+      : `de nuestra unión han nacido hijos/as que a la fecha son todos mayores de edad, por lo que no corresponde el tratamiento de cuestiones relativas al cuidado personal, régimen de comunicación ni fijación de cuota alimentaria.`,
+
+    // Convenio regulador - bienes (texto dinámico)
+    convenio_bienes: d.desc_bienes
+      ? `se propone la siguiente distribución respecto del bien/inmueble: ${d.desc_bienes}. [REVISAR: completar propuesta según el caso].`
+      : '[REVISAR: describir los bienes y formular propuesta de distribución].',
 
     // Situación laboral — usada en divorcio con propuesta y alimentos informal
     solicitante_ocupacion: d.ocupacion
