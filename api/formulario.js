@@ -144,8 +144,17 @@ function construirContexto(d) {
     anios_separacion:      aniosEntre(d.fecha_separacion, new Date().toISOString().split('T')[0]),
 
     // Divorcio - hijos y bienes
-    hijos_nombres:         d.datos_hijos_div || '',
-    desc_bienes:           d.desc_bienes || '',
+    hijos_nombres:         d.datos_hijos_div || '[REVISAR: consignar nombres, DNI y edades de los hijos]',
+    desc_bienes:           d.desc_bienes || 'REVISAR: describir bien',
+
+    // Situación laboral — usada en divorcio con propuesta y alimentos informal
+    solicitante_ocupacion: d.ocupacion
+      ? `${d.ocupacion.toLowerCase()}${d.recibo === 'SI' ? '' : ' de manera informal'}`
+      : '[REVISAR: describir ocupación]',
+
+    solicitante_situacion_laboral: d.ocupacion
+      ? `no tengo empleo registrado, ya que me dedico a ${d.ocupacion.toLowerCase()} de manera ${d.recibo === 'SI' ? 'registrada' : 'informal'}, percibiendo ingresos de aproximadamente $${d.monto || '____'} ${(d.freq || 'mensuales').toLowerCase()}`
+      : '[REVISAR: describir situación laboral del/la solicitante]',
   };
 }
 
