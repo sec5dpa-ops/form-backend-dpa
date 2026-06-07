@@ -1,1 +1,8 @@
-{}
+{
+  "functions": {
+    "api/formulario.js": {
+      "includeFiles": "templates/**",
+      "maxDuration": 30
+    }
+  }
+}
