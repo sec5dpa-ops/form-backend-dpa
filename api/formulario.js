@@ -1,10 +1,14 @@
 // api/formulario.js — Backend DPA N°1
 // Recibe el formulario, genera la demanda en Word y envía todo por email via Resend
+// También crea carpeta en Drive y registra en Sheets via Google Apps Script
 
 const fs = require('fs');
 const path = require('path');
 const PizZip = require('pizzip');
 const Docxtemplater = require('docxtemplater');
+
+// ── URL del Apps Script (reemplazar tras desplegar) ──────────────────────────
+const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL || '';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -184,6 +188,24 @@ function generarDocx(templatePath, contexto) {
   return doc.getZip().generate({ type: 'nodebuffer', compression: 'DEFLATE' });
 }
 
+// ── Llama al Apps Script para Drive + Sheets ─────────────────────────────────
+async function llamarAppsScript(datos, docxBase64) {
+  if (!APPS_SCRIPT_URL) return null;
+  try {
+    const resp = await fetch(APPS_SCRIPT_URL, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ ...datos, docxBase64 }),
+      redirect: 'follow',
+    });
+    const json = await resp.json();
+    return json.success ? json : null;
+  } catch (err) {
+    console.warn('Apps Script error (no crítico):', err.message);
+    return null;
+  }
+}
+
 // ── Handler principal ────────────────────────────────────────────────────────
 
 module.exports = async function handler(req, res) {
@@ -204,6 +226,7 @@ module.exports = async function handler(req, res) {
     const tramite   = datos.tramite || 'ADMISION';
     const contexto  = construirContexto(datos);
     const adjuntos  = [];
+    let   docxBase64 = null;
 
     // 1. PDF de la Declaración Jurada (viene del formulario)
     if (datos.pdfBase64) {
@@ -219,16 +242,22 @@ module.exports = async function handler(req, res) {
       const templatePath = path.join(process.cwd(), 'templates', templateName);
       if (fs.existsSync(templatePath)) {
         const docxBuffer = generarDocx(templatePath, contexto);
+        docxBase64 = docxBuffer.toString('base64');
         adjuntos.push({
           filename: `DEMANDA_${nombre}_${tramite}.docx`,
-          content:  docxBuffer.toString('base64'),
+          content:  docxBase64,
         });
       } else {
         console.warn('Template no encontrado:', templatePath);
       }
     }
 
-    // 3. Cuerpo del email con todos los datos
+    // 3. Crear carpeta en Drive + registrar en Sheets (via Apps Script)
+    const driveResult = await llamarAppsScript(datos, docxBase64);
+    const carpetaUrl  = driveResult?.carpetaUrl || null;
+    const sheetUrl    = driveResult?.sheetUrl   || null;
+
+    // 4. Cuerpo del email con todos los datos
     const cuerpo = `
 FORMULARIO DE ADMISIÓN — DEFENSORÍA DE POBRES Y AUSENTES N°1
 =============================================================
@@ -264,10 +293,15 @@ Hijos menores: ${datos.hijos_menores || 'No'}
 Bienes       : ${datos.tiene_bienes || 'No'}` : ''}
 
 Observaciones: ${datos.observaciones || '—'}
+
+${carpetaUrl ? `CARPETA EN DRIVE
+----------------
+${carpetaUrl}` : ''}
+${sheetUrl ? `\nPLANILLA ADMISIONES\n-------------------\n${sheetUrl}` : ''}
 =============================================================
     `.trim();
 
-    // 4. Enviar por Resend
+    // 6. Enviar por Resend
     const resp = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: {
@@ -287,7 +321,11 @@ Observaciones: ${datos.observaciones || '—'}
     if (!resp.ok) throw new Error(result.message || JSON.stringify(result));
 
     console.log('Email enviado OK:', result.id);
-    return res.status(200).json({ success: true, emailId: result.id });
+    return res.status(200).json({
+      success: true,
+      emailId: result.id,
+      ...(carpetaUrl ? { carpetaUrl } : {}),
+    });
 
   } catch (error) {
     console.error('Error:', error.message);
